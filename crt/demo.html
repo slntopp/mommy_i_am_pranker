@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crt.js demo</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  main {
+    height: 100%; display: grid; place-items: center;
+    background: linear-gradient(#2a1b5c, #c2551f);
+    font: 700 clamp(18px, 4vmin, 40px)/1.2 "Helvetica Neue", Arial, sans-serif;
+    color: #fff; text-shadow: 0.1em 0.1em 0 #000;
+  }
+  .card { background: #1d3f8f; border: 0.15em solid #fff; padding: 1em 1.5em; text-align: center; }
+  .big { font-size: 3em; color: #ffd23f; }
+  .controls { position: fixed; bottom: 12px; left: 12px; z-index: 2147483647; display: flex; gap: 8px; }
+  .controls button { font: 600 13px system-ui, sans-serif; padding: 6px 10px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <div>LOCAL FORECAST</div>
+    <div class="big">12°C</div>
+    <div>Cloudy · Wind ENE 11 km/h</div>
+  </div>
+</main>
+<div class="controls">
+  <button id="toggle">Effect off</button>
+  <button id="replay">Replay turn-on</button>
+</div>
+<script>
+/*
+ * crt.js — retro-TV look for any page. No dependencies, no assets.
+ *
+ * Same layering weather.com/retro uses:
+ *   1. content softened:  filter: blur(0.1vmin) saturate(0.9)
+ *   2. animated grain on top, mix-blend-mode: overlay
+ *   3. texture on top (scanlines + vignette + faint glow)
+ *   4. optional "TV turn-on" animation
+ * The site uses video files for 2 and 3; here they're generated.
+ *
+ * Usage:
+ *   <script src="crt.js"><\/script>
+ *   <script>
+ *     const crt = CRT({ target: 'main' });   // all options below are optional
+ *     // crt.destroy();                        // remove the effect
+ *   <\/script>
+ *
+ * Tip: give the page a black background so the turn-on animation reads as a TV.
+ */
+(function () {
+  const DEFAULTS = {
+    target: 'body',     // element (or selector) that gets blurred and does the turn-on
+    blur: '0.1vmin',    // softness; the site uses 0.05em on small screens
+    saturate: 0.9,
+    grain: 0.3,         // 0..1 opacity of the noise layer
+    grainScale: 2,      // CSS px per noise pixel (bigger = coarser grain)
+    grainFps: 24,
+    scanlines: 0.22,    // 0..1 darkness of scanlines
+    scanlineGap: 3,     // px between scanlines
+    vignette: 0.55,     // 0..1 darkness at the edges
+    glow: 0.06,         // 0..1 faint bright haze in the middle, flickers slightly
+    turnOn: true,
+    turnOnMs: 1600,
+    zIndex: 2147483000,
+  };
+
+  function CRT(options) {
+    const o = Object.assign({}, DEFAULTS, options || {});
+    const target = typeof o.target === 'string' ? document.querySelector(o.target) : o.target;
+    if (!target) throw new Error('CRT: target not found: ' + o.target);
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const root = document.documentElement; // overlays live outside the blurred element
+    const layers = [];
+    const timers = [];
+    const base = `blur(${o.blur}) saturate(${o.saturate})`;
+    const prevFilter = target.style.filter;
+    target.style.filter = base;
+
+    function layer(tag, blend, z) {
+      const el = document.createElement(tag);
+      Object.assign(el.style, {
+        position: 'fixed', inset: '0', width: '100%', height: '100%',
+        pointerEvents: 'none', mixBlendMode: blend, zIndex: String(z),
+      });
+      el.setAttribute('aria-hidden', 'true');
+      root.appendChild(el);
+      layers.push(el);
+      return el;
+    }
+
+    // Texture: scanlines + vignette (darkening).
+    const tex = layer('div', 'multiply', o.zIndex);
+    tex.style.background =
+      `radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,${o.vignette}) 100%),` +
+      `repeating-linear-gradient(to bottom, rgba(0,0,0,${o.scanlines}) 0 1px, transparent 1px ${o.scanlineGap}px)`;
+
+    // Glow: faint bright haze with a slight flicker (lightening).
+    if (o.glow > 0) {
+      const glow = layer('div', 'screen', o.zIndex + 1);
+      glow.style.background = `radial-gradient(ellipse at center, rgba(255,255,255,${o.glow}), transparent 70%)`;
+      if (!reduced) {
+        glow.animate(
+          [{ opacity: 1 }, { opacity: 0.85 }, { opacity: 1 }, { opacity: 0.92 }, { opacity: 1 }],
+          { duration: 180, iterations: Infinity, easing: 'steps(4)' }
+        );
+      }
+    }
+
+    // Grain: a few pre-rendered noise frames cycled on a canvas (overlay blend).
+    const cv = layer('canvas', 'overlay', o.zIndex + 2);
+    cv.style.opacity = String(o.grain);
+    cv.style.imageRendering = 'pixelated';
+    const ctx = cv.getContext('2d');
+    let frames = [];
+    let frame = 0;
+    function buildFrames() {
+      const w = Math.max(1, Math.ceil(innerWidth / o.grainScale));
+      const h = Math.max(1, Math.ceil(innerHeight / o.grainScale));
+      cv.width = w; cv.height = h;
+      frames = [];
+      for (let f = 0; f < (reduced ? 1 : 8); f++) {
+        const img = ctx.createImageData(w, h);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const v = (Math.random() * 255) | 0;
+          d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+        }
+        frames.push(img);
+      }
+      ctx.putImageData(frames[0], 0, 0);
+    }
+    buildFrames();
+    let resizeTimer;
+    const onResize = () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(buildFrames, 150); };
+    addEventListener('resize', onResize);
+    if (!reduced) {
+      timers.push(setInterval(() => {
+        frame = (frame + 1) % frames.length;
+        ctx.putImageData(frames[frame], 0, 0);
+      }, 1000 / o.grainFps));
+    }
+
+    // TV turn-on: flash, horizontal line, then open up vertically.
+    if (o.turnOn && !reduced) {
+      const f = b => `brightness(${b}) ${base}`;
+      target.animate([
+        { offset: 0,      filter: f(10), transform: 'scaleX(0) scaleY(0.005)', easing: 'ease' },
+        { offset: 0.4375, filter: f(10), transform: 'scaleX(0.875) scaleY(0.005)', easing: 'ease' },
+        { offset: 0.5,    filter: f(10), transform: 'scaleX(1) scaleY(0.005)', easing: 'linear' },
+        { offset: 0.6875, filter: f(1),  transform: 'scaleX(1) scaleY(0.475)', easing: 'linear' },
+        { offset: 1,      filter: f(1),  transform: 'scaleX(1) scaleY(1)' },
+      ], { duration: o.turnOnMs });
+    }
+
+    return {
+      destroy() {
+        timers.forEach(clearInterval);
+        clearTimeout(resizeTimer);
+        removeEventListener('resize', onResize);
+        layers.forEach(el => el.remove());
+        target.getAnimations().forEach(a => a.cancel());
+        target.style.filter = prevFilter;
+      },
+    };
+  }
+
+  window.CRT = CRT;
+})();
+
+</script>
+<script>
+  let crt = CRT({ target: 'main' });
+  const toggle = document.getElementById('toggle');
+  toggle.onclick = () => {
+    if (crt) { crt.destroy(); crt = null; toggle.textContent = 'Effect on'; }
+    else { crt = CRT({ target: 'main', turnOn: false }); toggle.textContent = 'Effect off'; }
+  };
+  document.getElementById('replay').onclick = () => {
+    if (crt) crt.destroy();
+    crt = CRT({ target: 'main' });
+    toggle.textContent = 'Effect off';
+  };
+</script>
+</body>
+</html>
